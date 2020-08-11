@@ -16,6 +16,7 @@ import (
 )
 
 var (
+	buildstamp             = "unknown"
 	allowParallelExecution = flag.Bool("allow-parallel-execution", false, "allow starting a new job even if the previous one haven't finished yet")
 	forceShell             = flag.Bool("shell", false, "force every command to run in a shell")
 )
@@ -76,6 +77,9 @@ func main() {
 	// setup logger
 	l := log.New(os.Stderr, "croncmd: ", log.LstdFlags|log.Lmsgprefix)
 	logger := cron.PrintfLogger(l)
+
+	// print ver
+	l.Printf("croncmd build %s", buildstamp)
 
 	// prepare cron opts
 	chain := []cron.JobWrapper{
