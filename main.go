@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
@@ -22,7 +23,7 @@ var (
 )
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s [flags] 'CRON SPEC' 'COMMAND' ['CRON SPEC' 'COMMAND' ...]\n\nFlags:\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage: %s [flags] [ /path/to/cronfile | ('CRON SPEC' 'COMMAND' ['CRON SPEC' 'COMMAND' ...]) ]\n\nFlags:\n", os.Args[0])
 	flag.PrintDefaults()
 }
 
@@ -70,6 +71,73 @@ func (j *job) Run() {
 	}
 }
 
+// Instruction represents a pair of cron specification and command.
+type Instruction struct {
+	CronSpec string
+	Command  string
+}
+
+func parseCrontab(path string, withUsers bool) ([]Instruction, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Initialize a scanner to read the file line by line
+	scanner := bufio.NewScanner(file)
+
+	var instructions []Instruction
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Ignore empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Split the line into fields
+		fields := strings.Fields(line)
+
+		// Check for special cron specifications
+		if len(fields) >= 2 && strings.HasPrefix(fields[0], "@") {
+			// Handle special formats like @daily, @hourly, etc.
+			cronSpec := fields[0]
+			command := strings.Join(fields[1:], " ")
+			if withUsers {
+				// The 2nd field is the user, which we ignore here
+				command = strings.Join(fields[2:], " ")
+			}
+
+			instructions = append(instructions, Instruction{
+				CronSpec: cronSpec,
+				Command:  command,
+			})
+		} else if len(fields) >= 6 {
+			// Handle standard 5-field cron specifications
+			cronSpec := strings.Join(fields[:5], " ")
+			command := strings.Join(fields[5:], " ")
+			if withUsers {
+				// The 6th field is the user, which we ignore here
+				command = strings.Join(fields[6:], " ")
+			}
+
+			instructions = append(instructions, Instruction{
+				CronSpec: cronSpec,
+				Command:  command,
+			})
+		}
+	}
+
+	// Check for errors during scanning
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return instructions, nil
+}
+
 func main() {
 	flag.Usage = printUsage
 	flag.Parse()
@@ -93,43 +161,66 @@ func main() {
 	// new cron
 	cr := cron.New(cron.WithChain(chain...))
 
+	var instructions []Instruction
+
 	// parse jobs from args
 	args := flag.Args()
 	if len(args) == 0 {
-		l.Printf("WARNING: No jobs specified.")
-	}
-
-	if len(args)%2 != 0 {
-		l.Printf("ERROR: Odd numbers of positional arguments.")
-		printUsage()
-		os.Exit(1)
-	}
-
-	reShellDetect := regexp.MustCompile(`$|<|>|&&|\|\|`)
-
-	for n := 0; n < len(args); n += 2 {
-		cronspec := strings.TrimSpace(args[n])
-		cmdspec := strings.TrimSpace(args[n+1])
-
-		if cronspec == "" {
-			l.Printf("WARNING: Empty cronspec for command %s, skipping", cmdspec)
-			continue
+		// try to parse system cronfile
+		if _, err := os.Stat("/etc/crontab"); err != nil {
+			l.Printf("WARNING: No jobs specified and /etc/crontab is not available.")
+		} else {
+			instructions, err = parseCrontab("/etc/crontab", true)
+			if err != nil {
+				l.Fatalf("Cannot parse /etc/contab: %v", err)
+			}
+		}
+	} else if len(args) == 1 {
+		var err error
+		instructions, err = parseCrontab(args[0], args[0] == "/etc/crontab")
+		if err != nil {
+			l.Fatalf("Cannot parse %s: %v", args[0], err)
+		}
+	} else {
+		if len(args)%2 != 0 {
+			l.Printf("ERROR: Odd numbers of positional arguments.")
+			printUsage()
+			os.Exit(1)
 		}
 
-		if cmdspec == "" {
-			l.Printf("WARNING: Empty command for cronspec %s, skipping", cronspec)
-			continue
-		}
+		for n := 0; n < len(args); n += 2 {
+			cronspec := strings.TrimSpace(args[n])
+			cmdspec := strings.TrimSpace(args[n+1])
 
+			if cronspec == "" {
+				l.Printf("WARNING: Empty cronspec for command %s, skipping", cmdspec)
+				continue
+			}
+
+			if cmdspec == "" {
+				l.Printf("WARNING: Empty command for cronspec %s, skipping", cronspec)
+				continue
+			}
+
+			instructions = append(instructions, Instruction{
+				CronSpec: cronspec,
+				Command:  cmdspec,
+			})
+		}
+	}
+
+	reShellDetect := regexp.MustCompile("[$<>&|;#`]")
+
+	for _, inst := range instructions {
 		useShell := *forceShell
-		if !useShell && reShellDetect.MatchString(cmdspec) {
+		if !useShell && reShellDetect.MatchString(inst.Command) {
 			useShell = true
 		}
 
-		_, err := cr.AddJob(cronspec, &job{
+		_, err := cr.AddJob(inst.CronSpec, &job{
 			logger:      l,
 			preserveEnv: true,
-			command:     cmdspec,
+			command:     inst.Command,
 			useShell:    useShell,
 		})
 		if err != nil {
@@ -138,22 +229,6 @@ func main() {
 	}
 
 	l.Printf("Running with %d jobs defined", len(cr.Entries()))
-
-	// _, err := cr.AddFunc("* * * * *", func() { //@every 1m
-	// 	t := time.Now()
-	// 	tstr := t.Format(time.RFC3339)
-
-	// 	fmt.Printf("start %v\n", tstr)
-	// 	if t.Minute()%5 == 0 {
-	// 		panic("test panic every 5m")
-	// 	}
-	// 	time.Sleep(time.Minute + 30*time.Second)
-	// 	fmt.Printf("finish of %v\n", tstr)
-	// })
-
-	// if err != nil {
-	// 	panic(err)
-	// }
 
 	cr.Run()
 }
