@@ -1,7 +1,5 @@
 #!/bin/sh
 
-upx -V >/dev/null && UPX="${UPX:-1}"
-
 set -e
 
 BUILDSTAMP="$(git rev-parse --short HEAD)"
@@ -13,10 +11,7 @@ build() {
 
 	GO_OUT_PATH="./release/$GOOS-$GOARCH"
 
-	go build -o "$GO_OUT_PATH-no-upx" -ldflags="-w -s -X main.buildstamp=$BUILDSTAMP" .
-	if [ "$UPX" = "1" ]; then
-		upx -f --brute -o "$GO_OUT_PATH" "$GO_OUT_PATH-no-upx"
-	fi
+	go build -o "$GO_OUT_PATH" -ldflags="-w -s -X main.buildstamp=$BUILDSTAMP" .
 }
 
 rm -rf ./release
