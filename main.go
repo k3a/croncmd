@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -20,10 +21,22 @@ var (
 	buildstamp             = "unknown"
 	allowParallelExecution = flag.Bool("allow-parallel-execution", false, "allow starting a new job even if the previous one haven't finished yet")
 	forceShell             = flag.Bool("shell", false, "force every command to run in a shell")
+	crontabMode            = flag.Bool("crontabs", false, "when true, arguments are cronfile paths or globs instead of cronspec-command pairs")
 )
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s [flags] [ /path/to/cronfile | ('CRON SPEC' 'COMMAND' ['CRON SPEC' 'COMMAND' ...]) ]\n\nFlags:\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, `Usage:
+  # load jobs from /etc/contab
+  %s
+
+  # jobs defined as positional arguments
+  %s [flags] 'CRON SPEC' 'COMMAND' ['CRON SPEC' 'COMMAND' ...]
+
+  # positional arguments as globs to find multiple cronfiles
+  %s [flags] -crontabs /etc/crontab '/etc/cron.d/*' [other/globs ...]
+
+Flags:
+`, os.Args[0], os.Args[0], os.Args[0])
 	flag.PrintDefaults()
 }
 
@@ -161,55 +174,77 @@ func main() {
 	// new cron
 	cr := cron.New(cron.WithChain(chain...))
 
-	var instructions []Instruction
+	var (
+		err          error
+		instructions []Instruction
+		args         = flag.Args()
+	)
 
-	// parse jobs from args
-	args := flag.Args()
-	if len(args) == 0 {
-		// try to parse system cronfile
-		if _, err := os.Stat("/etc/crontab"); err != nil {
-			l.Printf("WARNING: No jobs specified and /etc/crontab is not available.")
-		} else {
-			instructions, err = parseCrontab("/etc/crontab", true)
+	if *crontabMode && len(args) > 0 {
+		// parse jobs from crontab globs
+		for _, pattern := range args {
+			matches, err := filepath.Glob(pattern)
 			if err != nil {
-				l.Fatalf("Cannot parse /etc/contab: %v", err)
+				l.Fatalf("ERROR: Bad glob pattern %s: %v", pattern, err)
 			}
-		}
-	} else if len(args) == 1 {
-		var err error
-		instructions, err = parseCrontab(args[0], args[0] == "/etc/crontab")
-		if err != nil {
-			l.Fatalf("Cannot parse %s: %v", args[0], err)
+			if len(matches) == 0 {
+				l.Printf("No crontab files matching %s", pattern)
+			}
+			for _, cronpath := range matches {
+				instructions, err = parseCrontab(cronpath, cronpath == "/etc/crontab")
+				if err != nil {
+					l.Fatalf("Cannot parse %s: %v", args, err)
+				}
+			}
 		}
 	} else {
-		if len(args)%2 != 0 {
-			l.Printf("ERROR: Odd numbers of positional arguments.")
-			printUsage()
-			os.Exit(1)
-		}
-
-		for n := 0; n < len(args); n += 2 {
-			cronspec := strings.TrimSpace(args[n])
-			cmdspec := strings.TrimSpace(args[n+1])
-
-			if cronspec == "" {
-				l.Printf("WARNING: Empty cronspec for command %s, skipping", cmdspec)
-				continue
+		// parse jobs from args
+		if len(args) == 0 {
+			// try to parse system cronfile first
+			if _, err := os.Stat("/etc/crontab"); err != nil {
+				l.Printf("WARNING: No jobs specified and /etc/crontab is not available.")
+			} else {
+				instructions, err = parseCrontab("/etc/crontab", true)
+				if err != nil {
+					l.Fatalf("Cannot parse /etc/contab: %v", err)
+				}
+			}
+		} else if len(args) == 1 {
+			// backward-compatibility: a single positional argument as a path to a crontab file
+			instructions, err = parseCrontab(args[0], args[0] == "/etc/crontab")
+			if err != nil {
+				l.Fatalf("Cannot parse %s: %v", args[0], err)
+			}
+		} else {
+			if len(args)%2 != 0 {
+				l.Printf("ERROR: Odd numbers of positional arguments.")
+				printUsage()
+				os.Exit(1)
 			}
 
-			if cmdspec == "" {
-				l.Printf("WARNING: Empty command for cronspec %s, skipping", cronspec)
-				continue
-			}
+			for n := 0; n < len(args); n += 2 {
+				cronspec := strings.TrimSpace(args[n])
+				cmdspec := strings.TrimSpace(args[n+1])
 
-			instructions = append(instructions, Instruction{
-				CronSpec: cronspec,
-				Command:  cmdspec,
-			})
+				if cronspec == "" {
+					l.Printf("WARNING: Empty cronspec for command %s, skipping", cmdspec)
+					continue
+				}
+
+				if cmdspec == "" {
+					l.Printf("WARNING: Empty command for cronspec %s, skipping", cronspec)
+					continue
+				}
+
+				instructions = append(instructions, Instruction{
+					CronSpec: cronspec,
+					Command:  cmdspec,
+				})
+			}
 		}
 	}
 
-	reShellDetect := regexp.MustCompile("[$<>&|;#`]")
+	reShellDetect := regexp.MustCompile("[$<>&|;#\"'`]")
 
 	for _, inst := range instructions {
 		useShell := *forceShell
