@@ -191,9 +191,11 @@ func main() {
 				l.Printf("No crontab files matching %s", pattern)
 			}
 			for _, cronpath := range matches {
-				instructions, err = parseCrontab(cronpath, cronpath == "/etc/crontab")
+				newInstructions, err := parseCrontab(cronpath, cronpath == "/etc/crontab")
 				if err != nil {
 					l.Fatalf("Cannot parse %s: %v", args, err)
+				} else {
+					instructions = append(instructions, newInstructions...)
 				}
 			}
 		}
