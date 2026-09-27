@@ -21,10 +21,17 @@ Flags:
         force every command to run in a shell
 ```
 
-Jobs are specified in pairs or positional arguments like this:
+Jobs are specified in pairs of positional arguments like this:
 
 ```
 croncmd '@weekly' '/do/sth.sh' '0 6 * * *' '/do/sth/else.sh' 
+```
+
+Or it can load crontab files with `-crontabs` option:
+
+```
+# this will load jobs from /etc/crontab and any files in /etc/cron.d/ directory
+croncmd -crontabs /etc/crontab '/etc/cron.d/*'
 ```
 
 For the cron spec syntax, see the [Robfig's Cron Doc](https://godoc.org/github.com/robfig/cron).
